@@ -118,6 +118,43 @@ async function fetchVol5m(poolAddress) {
   }
 }
 
+// ─── METEORA PORTFOLIO DATAPI (samakan angka dengan UI Meteora) ─────────
+async function fetchMeteoraPortfolioPool(userAddress, poolAddress, positionKey) {
+  try {
+    const { data } = await axios.get('https://dlmm.datapi.meteora.ag/portfolio/open', {
+      params: { user: userAddress, page: 1, page_size: 50 },
+      timeout: 10000,
+    });
+
+    const pools = Array.isArray(data?.pools) ? data.pools : [];
+    const pool = pools.find((p) => {
+      if (p.poolAddress !== poolAddress) return false;
+      if (!positionKey) return true;
+      const list = Array.isArray(p.listPositions) ? p.listPositions : [];
+      return list.includes(positionKey);
+    });
+
+    if (!pool) return null;
+
+    const pnlUsd = parseFloat(pool.pnl);
+    const pnlSol = parseFloat(pool.pnlSol);
+    const pnlPct = parseFloat(pool.pnlPctChange);
+    const unclaimedFeesSol = parseFloat(pool.unclaimedFeesSol);
+    const poolPrice = parseFloat(pool.poolPrice);
+
+    return {
+      pnlUsd: Number.isFinite(pnlUsd) ? pnlUsd : null,
+      pnlSol: Number.isFinite(pnlSol) ? pnlSol : null,
+      pnlPct: Number.isFinite(pnlPct) ? pnlPct : null,
+      unclaimedFeesSol: Number.isFinite(unclaimedFeesSol) ? unclaimedFeesSol : null,
+      poolPrice: Number.isFinite(poolPrice) ? poolPrice : null,
+    };
+  } catch (e) {
+    console.error('[MeteoraDatapi] Fetch error:', e.message);
+    return null;
+  }
+}
+
 function getOORDirection(activeBinId, minBinId, maxBinId) {
   if (activeBinId > maxBinId) return 'ABOVE';
   if (activeBinId < minBinId) return 'BELOW';
@@ -199,22 +236,45 @@ async function runCycle() {
     const { inRange, pnlSol, pnlPct, totalFeeSol, feeXRaw, feeYRaw, currentPrice, activeBinId, solInPos, tokenInPos, feeSol, feeToken, tokenDecimals, dlmm, pos } = data;
     const pos_state = state.activePosition;
 
-    // ── EST PnL: pakai nilai on-chain Meteora (lebih stabil untuk DLMM)
-    // Formula sejalan dengan UI Meteora:
-    // PnL = (Current Balance + Unclaimed Fees) - Deposits
+    // Nilai default dari monitor on-chain
     let estPnlSol = pnlSol;
     let estPnlPct = pnlPct;
     let estPnlUsd = null;
-    try {
-      const solPriceUsd = await fetchJupiterPriceUsd('So11111111111111111111111111111111111111112');
-      if (solPriceUsd && solPriceUsd > 0) {
-        estPnlUsd = estPnlSol * solPriceUsd;
-        console.log(`  [EstPnL] Meteora on-chain: ${fmtPct(estPnlPct)} (~$${estPnlUsd.toFixed(2)}) | SOL=$${solPriceUsd.toFixed(2)}`);
-      } else {
-        console.log(`  [EstPnL] Meteora on-chain: ${fmtPct(estPnlPct)} (USD unavailable)`);
+    let displayFeeSol = totalFeeSol;
+    let displayPrice = currentPrice;
+
+    // Prioritaskan angka dari Meteora datapi (sama dengan UI app.meteora.ag)
+    const mData = await fetchMeteoraPortfolioPool(
+      wallet.publicKey.toBase58(),
+      pos_state.poolAddress,
+      pos_state.positionKey
+    );
+
+    if (mData) {
+      if (mData.pnlSol !== null) estPnlSol = mData.pnlSol;
+      if (mData.pnlPct !== null) estPnlPct = mData.pnlPct;
+      if (mData.pnlUsd !== null) estPnlUsd = mData.pnlUsd;
+      if (mData.unclaimedFeesSol !== null) displayFeeSol = mData.unclaimedFeesSol;
+      if (mData.poolPrice !== null) displayPrice = mData.poolPrice;
+
+      console.log(
+        `  [EstPnL] Meteora datapi: ${fmtPct(estPnlPct)} ` +
+        `${estPnlUsd !== null ? `(~$${estPnlUsd.toFixed(2)})` : ''} | ` +
+        `Fee: ${fmtSol(displayFeeSol)} SOL | Price: ${fmtPrice(displayPrice)}`
+      );
+    } else {
+      // fallback: on-chain + konversi USD dari SOL price
+      try {
+        const solPriceUsd = await fetchJupiterPriceUsd('So11111111111111111111111111111111111111112');
+        if (solPriceUsd && solPriceUsd > 0) {
+          estPnlUsd = estPnlSol * solPriceUsd;
+          console.log(`  [EstPnL] Fallback on-chain: ${fmtPct(estPnlPct)} (~$${estPnlUsd.toFixed(2)}) | SOL=$${solPriceUsd.toFixed(2)}`);
+        } else {
+          console.log(`  [EstPnL] Fallback on-chain: ${fmtPct(estPnlPct)} (USD unavailable)`);
+        }
+      } catch (e) {
+        console.error('[EstPnL] SOL price fetch error:', e.message);
       }
-    } catch (e) {
-      console.error('[EstPnL] SOL price fetch error:', e.message);
     }
 
     // ── VOLUME HEALTH CHECK
@@ -239,7 +299,7 @@ async function runCycle() {
       saveState(state);
       if (pos_state.volDryCycles >= VOL_DRY_CYCLES) {
         console.log(`[Action] VOL_DRY triggered after ${VOL_DRY_CYCLES} cycles!`);
-        await handleClose(state, pos_state, 'VOL_DRY', estPnlSol, estPnlPct, totalFeeSol);
+        await handleClose(state, pos_state, 'VOL_DRY', estPnlSol, estPnlPct, displayFeeSol);
         return;
       }
     } else {
@@ -272,7 +332,7 @@ async function runCycle() {
         await sendTelegram(
           `✅ <b>Kembali In-Range!</b>\n` +
           `Token: <b>${pos_state.symbol}</b>\n` +
-          `PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(totalFeeSol)} SOL\n` +
+          `PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(displayFeeSol)} SOL\n` +
           `Fee mulai masuk lagi 💰`
         );
       }
@@ -284,7 +344,7 @@ async function runCycle() {
     const outOfRangeMinutes = pos_state.outOfRangeSince
       ? (Date.now() - pos_state.outOfRangeSince) / 60000 : 0;
 
-    console.log(`  PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(totalFeeSol)} SOL | InRange: ${inRange} | OOR: ${outOfRangeMinutes.toFixed(1)}min (${oorDir}) | Limit: ${oorLimit}min`);
+    console.log(`  PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(displayFeeSol)} SOL | InRange: ${inRange} | OOR: ${outOfRangeMinutes.toFixed(1)}min (${oorDir}) | Limit: ${oorLimit}min`);
 
     // ── STOP LOSS (MATI / DISABLE SEMENTARA)
     /*
@@ -298,7 +358,7 @@ async function runCycle() {
     // ── TAKE PROFIT
     if (estPnlPct >= TAKE_PROFIT_PCT) {
       console.log('[Action] TAKE PROFIT triggered!');
-      await handleClose(state, pos_state, 'TAKE_PROFIT', estPnlSol, estPnlPct, totalFeeSol);
+      await handleClose(state, pos_state, 'TAKE_PROFIT', estPnlSol, estPnlPct, displayFeeSol);
       return;
     }
 
@@ -306,7 +366,7 @@ async function runCycle() {
     if (!inRange && outOfRangeMinutes >= oorLimit) {
       const reason = oorDir === 'ABOVE' ? 'OOR_ABOVE' : 'OOR_BELOW';
       console.log(`[Action] OOR ${oorDir} limit reached (${outOfRangeMinutes.toFixed(1)}/${oorLimit}min), closing.`);
-      await handleClose(state, pos_state, reason, estPnlSol, estPnlPct, totalFeeSol);
+      await handleClose(state, pos_state, reason, estPnlSol, estPnlPct, displayFeeSol);
       return;
     }
 
@@ -331,8 +391,8 @@ async function runCycle() {
         `📊 <b>Position Update</b>\n` +
         `Token: <b>${pos_state.symbol}</b>\n` +
         `PnL: <b>${pnlText}</b>\n` +
-        `Fee: ${fmtSol(totalFeeSol)} SOL\n` +
-        `Price: ${fmtPrice(currentPrice)}\n` +
+        `Fee: ${fmtSol(displayFeeSol)} SOL\n` +
+        `Price: ${fmtPrice(displayPrice)}\n` +
         `Status: ${inRange ? '✅ In Range' : `⚠️ OOR ${oorDir} (${outOfRangeMinutes.toFixed(0)}/${oorLimit}min)`}`
       );
     }

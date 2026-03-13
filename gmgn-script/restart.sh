@@ -13,7 +13,7 @@ fi
 pkill -f "/root/gmgn-venv/bin/python .*gmgn.py" 2>/dev/null || true
 sleep 1
 
-nohup bash -c 'while true; do /root/gmgn-venv/bin/python gmgn.py >> gmgn_bot.log 2>&1; sleep 120; done' >/dev/null 2>&1 &
+nohup bash -c 'while true; do /root/gmgn-venv/bin/python gmgn.py >> gmgn_bot.log 2>&1; sleep 60; done' >/dev/null 2>&1 &
 echo $! > gmgn_bot.pid
 
 echo "GMGN loop started PID: $(cat gmgn_bot.pid)"

@@ -139,14 +139,14 @@ export async function scanTokens() {
     };
 
     console.log(`  Pool    : ${pool.address}`);
-    console.log(`  Liq     : ${fmtUsd(pool.liquidity)} (min: ${fmtUsd(MIN_POOL_LIQUIDITY)}) | APR: ${pool.apr.toFixed(1)}% | Fee24h: ${fmtUsd(pool.fees24h)}`);
+    console.log(`  Liq     : ${fmtUsd(pool.liquidity)} | APR: ${pool.apr.toFixed(1)}% | Fee24h: ${fmtUsd(pool.fees24h)}`);
 
-    // Filter liquidity
-    if (pool.liquidity < MIN_POOL_LIQUIDITY) {
-      console.log(`  ❌ REJECT: Liquidity terlalu kecil (${fmtUsd(pool.liquidity)} < ${fmtUsd(MIN_POOL_LIQUIDITY)})`);
-      results.rejected.low_liquidity = (results.rejected.low_liquidity || 0) + 1;
-      continue;
-    }
+    // Filter liquidity (Dimatikan atas request)
+    // if (pool.liquidity < MIN_POOL_LIQUIDITY) {
+    //   console.log(`  ❌ REJECT: Liquidity terlalu kecil (${fmtUsd(pool.liquidity)} < ${fmtUsd(MIN_POOL_LIQUIDITY)})`);
+    //   results.rejected.low_liquidity = (results.rejected.low_liquidity || 0) + 1;
+    //   continue;
+    // }
 
     console.log(`  ✅ LOLOS filter GMGN+Meteora — cek Cookin.fun...`);
 

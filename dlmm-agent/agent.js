@@ -322,8 +322,8 @@ async function runCycle() {
     //   return;
     // }
 
-    // ── STATUS update tiap 3 cycle (15 menit)
-    if (cycleCount % 3 === 0) {
+    // ── STATUS update setiap cycle (sekarang 1 menit)
+    {
       const pnlText = estPnlUsd !== null
         ? `${fmtPct(estPnlPct)} (~$${estPnlUsd.toFixed(2)})`
         : fmtPct(estPnlPct);

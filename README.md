@@ -64,9 +64,10 @@ Project ini menggabungkan 2 komponen dalam **1 folder**:
   - buka posisi DLMM
   - simpan state ke `state.json`
 - Jika ada posisi aktif:
-  - monitor PnL + fee
+  - monitor PnL + fee (basis nilai on-chain Meteora; bukan estimasi token price Jupiter)
   - cek in-range / out-of-range
-  - auto close kalau TP/SL/OOR/volume-dry condition terpenuhi
+  - auto close kalau TP/OOR/volume-dry condition terpenuhi
+  - Catatan: STOP LOSS saat ini di-disable sementara (untuk hindari false-trigger PnL)
   - opsional swap token ke SOL
 - Kirim update ke Telegram (start, scan, open, status, close, crash).
 

@@ -102,7 +102,9 @@ async function fetchVol5m(poolAddress) {
     const url = `https://api.dexscreener.com/latest/dex/pairs/solana/${poolAddress}`;
     const res = await axios.get(url, { timeout: 8000 });
     const pair = res.data?.pair || res.data?.pairs?.[0];
-    return pair?.volume?.m5 ?? null;
+    const volUSD = pair?.volume?.m5;
+
+    return typeof volUSD === 'number' ? volUSD : null;
   } catch (e) {
     console.error('[VolCheck] Fetch error:', e.message);
     return null;
@@ -190,41 +192,40 @@ async function runCycle() {
     const { inRange, pnlSol, pnlPct, totalFeeSol, feeXRaw, feeYRaw, currentPrice, activeBinId, solInPos, tokenInPos, feeSol, feeToken, tokenDecimals, dlmm, pos } = data;
     const pos_state = state.activePosition;
 
-    // ── EST PnL via Jupiter Price API (lebih akurat dari activeBin.price)
+    // ── EST PnL: pakai nilai on-chain Meteora (lebih stabil untuk DLMM)
+    // Formula sejalan dengan UI Meteora:
+    // PnL = (Current Balance + Unclaimed Fees) - Deposits
     let estPnlSol = pnlSol;
     let estPnlPct = pnlPct;
+    let estPnlUsd = null;
     try {
-      const jupPriceUsd = await fetchJupiterPriceUsd(pos_state.mint);
       const solPriceUsd = await fetchJupiterPriceUsd('So11111111111111111111111111111111111111112');
-      if (jupPriceUsd && solPriceUsd && solPriceUsd > 0) {
-        const tokenPriceInSol = jupPriceUsd / solPriceUsd;
-        const tokenValueSol = tokenInPos * tokenPriceInSol;
-        const feeTokenSol = feeToken * tokenPriceInSol;
-        const totalValueSol = solInPos + tokenValueSol + feeSol + feeTokenSol;
-        estPnlSol = totalValueSol - pos_state.budgetSol;
-        estPnlPct = (estPnlSol / pos_state.budgetSol) * 100;
-        console.log(`  [EstPnL] Jupiter price: $${jupPriceUsd.toFixed(8)} | tokenInPos: ${tokenInPos.toFixed(2)} | est: ${fmtPct(estPnlPct)}`);
+      if (solPriceUsd && solPriceUsd > 0) {
+        estPnlUsd = estPnlSol * solPriceUsd;
+        console.log(`  [EstPnL] Meteora on-chain: ${fmtPct(estPnlPct)} (~$${estPnlUsd.toFixed(2)}) | SOL=$${solPriceUsd.toFixed(2)}`);
+      } else {
+        console.log(`  [EstPnL] Meteora on-chain: ${fmtPct(estPnlPct)} (USD unavailable)`);
       }
     } catch (e) {
-      console.error('[EstPnL] Jupiter price fetch error:', e.message);
+      console.error('[EstPnL] SOL price fetch error:', e.message);
     }
 
     // ── VOLUME HEALTH CHECK
     const vol5m = await fetchVol5m(pos_state.poolAddress);
     console.log(`  Vol5m: ${vol5m !== null ? fmtUsd(vol5m) : 'N/A'} (threshold: ${fmtUsd(VOL_DRY_THRESHOLD_USD)})`);
 
-    // vol5m null = fetch gagal (429/timeout) — anggap volume dry juga
-    const isVolDry = vol5m === null || vol5m < VOL_DRY_THRESHOLD_USD;
-
-    if (isVolDry) {
+    // vol5m null = fetch gagal (429/timeout). SKIP perhitungan cycle biar ga panik.
+    if (vol5m === null) {
+      console.log(`  [VolDry] API Fetch Error - Volume check skipped this cycle. Menganggap volume aman.`);
+      // biarkan volDryCycles yang lama tidak diubah
+    } else if (vol5m < VOL_DRY_THRESHOLD_USD) {
       pos_state.volDryCycles = (pos_state.volDryCycles || 0) + 1;
-      const reason429 = vol5m === null ? ' (fetch error)' : '';
-      console.log(`  [VolDry] Low volume cycle ${pos_state.volDryCycles}/${VOL_DRY_CYCLES}${reason429}`);
+      console.log(`  [VolDry] Low volume ($${vol5m}) cycle ${pos_state.volDryCycles}/${VOL_DRY_CYCLES}`);
       if (pos_state.volDryCycles === 1) {
         await sendTelegram(
           `📉 <b>Volume Mulai Sepi!</b>\n` +
           `Token: <b>${pos_state.symbol}</b>\n` +
-          `Vol 5m: <b>${vol5m !== null ? fmtUsd(vol5m) : 'N/A (fetch error)'}</b> (threshold: ${fmtUsd(VOL_DRY_THRESHOLD_USD)})\n` +
+          `Vol 5m: <b>${fmtUsd(vol5m)}</b> (threshold: ${fmtUsd(VOL_DRY_THRESHOLD_USD)})\n` +
           `Cycle: ${pos_state.volDryCycles}/${VOL_DRY_CYCLES} — pantau terus...`
         );
       }
@@ -278,12 +279,14 @@ async function runCycle() {
 
     console.log(`  PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(totalFeeSol)} SOL | InRange: ${inRange} | OOR: ${outOfRangeMinutes.toFixed(1)}min (${oorDir}) | Limit: ${oorLimit}min`);
 
-    // ── STOP LOSS
+    // ── STOP LOSS (MATI / DISABLE SEMENTARA)
+    /*
     if (estPnlPct <= -STOP_LOSS_PCT) {
       console.log('[Action] STOP LOSS triggered!');
       await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, totalFeeSol);
       return;
     }
+    */
 
     // ── TAKE PROFIT
     if (estPnlPct >= TAKE_PROFIT_PCT) {
@@ -314,10 +317,13 @@ async function runCycle() {
 
     // ── STATUS update tiap 3 cycle (15 menit)
     if (cycleCount % 3 === 0) {
+      const pnlText = estPnlUsd !== null
+        ? `${fmtPct(estPnlPct)} (~$${estPnlUsd.toFixed(2)})`
+        : fmtPct(estPnlPct);
       await sendTelegram(
         `📊 <b>Position Update</b>\n` +
         `Token: <b>${pos_state.symbol}</b>\n` +
-        `PnL: <b>${fmtPct(estPnlPct)}</b>\n` +
+        `PnL: <b>${pnlText}</b>\n` +
         `Fee: ${fmtSol(totalFeeSol)} SOL\n` +
         `Price: ${currentPrice.toFixed(8)}\n` +
         `Status: ${inRange ? '✅ In Range' : `⚠️ OOR ${oorDir} (${outOfRangeMinutes.toFixed(0)}/${oorLimit}min)`}`
@@ -515,7 +521,7 @@ async function main() {
   ensureSingleInstance();
   console.log('🤖 DLMM Agent starting...');
   console.log(`Wallet: ${wallet.publicKey.toBase58()}`);
-  console.log(`SL: -${STOP_LOSS_PCT}% | TP: +${TAKE_PROFIT_PCT}%`);
+  console.log(`SL: OFF (configured -${STOP_LOSS_PCT}% disabled) | TP: +${TAKE_PROFIT_PCT}%`);
   console.log(`OOR Above: ${OOR_ABOVE_LIMIT_MIN}min | OOR Below: ${OOR_BELOW_LIMIT_MIN}min`);
 
   // Patch dlmm bytes import
@@ -534,7 +540,7 @@ async function main() {
     `🤖 <b>DLMM Agent Started!</b>\n` +
     `Wallet: <code>${wallet.publicKey.toBase58()}</code>\n` +
     `Budget: ${BUDGET_SOL} SOL | Bins: ${process.env.RANGE_BINS}\n` +
-    `TP: +${TAKE_PROFIT_PCT}% | SL: -${STOP_LOSS_PCT}%\n` +
+    `TP: +${TAKE_PROFIT_PCT}% | SL: OFF (configured -${STOP_LOSS_PCT}%)\n` +
     `OOR Pump: ${OOR_ABOVE_LIMIT_MIN}min | OOR Dump: ${OOR_BELOW_LIMIT_MIN}min\n` +
     `Cycle: tiap ${CYCLE_INTERVAL_SEC / 60} menit\n` +
     `Orphan check: tiap 3 cycles ✅`

@@ -197,10 +197,6 @@ export function passCookinFilter(data) {
   if (data.bearishCount > 2)
     reasons.push(`Terlalu banyak bearish signals (${data.bearishCount}/7)`);
 
-  // Hard reject kalau score rendah
-  if (data.score !== null && data.score < 10)
-    reasons.push(`Score=${data.score} rendah`);
-
   // Hard reject individual ekstrim
   if (data.dumpers !== null && data.dumpers > 50)
     reasons.push(`Dumpers=${data.dumpers}%`);

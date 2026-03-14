@@ -29,6 +29,37 @@ function saveMemory(mem) {
   fs.writeFileSync(MEMORY_FILE, JSON.stringify(mem, null, 2));
 }
 
+function applyEntryOverride(aiResult, tokenData, memory) {
+  if (!aiResult || aiResult.decision !== 'SKIP') return aiResult;
+
+  const cookin = tokenData?.cookin || {};
+  const bearish = Number.isFinite(cookin.bearishCount) ? cookin.bearishCount : null;
+  const bullish = Number.isFinite(cookin.bullishCount) ? cookin.bullishCount : null;
+  const vol = Number(tokenData?.vol || 0);
+  const liq = Number(tokenData?.pool?.liquidity || 0);
+
+  // Mode belajar: jangan terlalu takut kalau cuma 1-2 merah
+  // Asal likuiditas/volume minimum masuk akal.
+  const explorationEligible =
+    bearish !== null && bearish <= 2 &&
+    (bullish === null || bullish >= 2) &&
+    vol >= 30000 &&
+    liq >= 10000;
+
+  const stillEarlyLearning = (memory?.total_trades || 0) < 40;
+
+  if (explorationEligible && stillEarlyLearning) {
+    return {
+      decision: 'ENTRY',
+      confidence: Math.max(55, Number(aiResult.confidence || 0)),
+      reasoning: `${aiResult.reasoning} | Override: mode belajar aktif, 1-2 merah tidak auto-skip kalau volume+liq masih layak.`,
+      trade_plan: aiResult.trade_plan || 'Entry bertahap, amankan profit cepat, cutloss hanya jika momentum benar-benar mati.'
+    };
+  }
+
+  return aiResult;
+}
+
 export async function decideEntry(tokenData, recentTrades) {
   const memory = loadMemory();
   const systemPrompt = `Kamu adalah AI Trading Agent spesialis Solana DLMM (Meteora). 
@@ -37,9 +68,11 @@ Gunakan strategi scalping agresif tapi AMAN (Smart Risk Management). Analisis je
 Jika risk/reward jelek, tolak dengan keras. Jika peluang bagus, suruh ENTRY dengan nyali penuh.
 
 POLA PIKIR ENTRY:
-- Cek likuiditas dan volume 5m. Kalau volume tinggi tapi likuiditas tipis, awas slipage!
-- Baca Cookin signal: Minimalisir token yang didominasi Bundle/Bots terlalu besar kecuali pergerakan market emang super nge-pump.
-- Tentukan Target TP (Take Profit) realistis di awal (misal 5-15%) & batas toleransi DD sebelum cutloss.
+- Cek likuiditas dan volume 5m. Kalau volume tinggi tapi likuiditas tipis, awas slipage.
+- Gunakan PENILAIAN KOMPOSIT. Satu metrik merah (contoh Bundle tinggi) TIDAK BOLEH jadi alasan tunggal SKIP.
+- Baru SKIP keras jika kombinasi buruk (contoh: bearish >=3, atau volume lemah + liq tipis + holder concentration parah).
+- Kalau sinyal campuran (1-2 merah tapi masih ada 2+ hijau), pilih ENTRY eksplorasi dengan risk note, supaya agent belajar by doing.
+- Tentukan target TP realistis (3-12%) dan toleransi drawdown awal (contoh -3% sampai -5%) sebelum cutloss.
 
 Memori/Pengalaman Masa Lalumu:
 ${memory.lessons.join('\n- ')}
@@ -71,7 +104,10 @@ Jawab dalam format JSON terstruktur persis seperti ini:
     const textResp = response.content[0].text;
     const jsonMatch = textResp.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("Claude did not return JSON");
-    return JSON.parse(jsonMatch[0]);
+    const parsed = JSON.parse(jsonMatch[0]);
+
+    // Safety-rails: hindari SKIP yang terlalu konservatif di fase belajar awal.
+    return applyEntryOverride(parsed, tokenData, memory);
 
   } catch (error) {
     console.error('[AI Entry Error]', error.message);

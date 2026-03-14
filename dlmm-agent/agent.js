@@ -4,6 +4,7 @@ dotenv.config();
 
 import axios from 'axios';
 import { sendTelegram } from './telegram.js';
+import { decideEntry, decideExit, reflectTrade } from './brain.js';
 import { scanTokens } from './scanner.js';
 import { openPosition, monitorPosition, claimFees, closePosition, swapTokenToSol, fetchJupiterPriceUsd, scanOrphanPositions, connection, wallet } from './meteora.js';
 import { scrapeCookinToken, passCookinFilter, formatCookinSummary } from './cookin-scraper.js';
@@ -295,61 +296,22 @@ async function runCycle() {
     const vol5m = await fetchVol5m(pos_state.mint);
     console.log(`  Vol5m: ${vol5m !== null ? fmtUsd(vol5m) : 'N/A'} (threshold: ${fmtUsd(VOL_DRY_THRESHOLD_USD)})`);
 
-    // vol5m null = fetch gagal (429/timeout). SKIP perhitungan cycle biar ga panik.
+    // ── OLD VOLUME HEALTH CHECK DIMATIKAN KARENA ADA AI
+    // Tapi data volume tetap kita butuhkan buat AI
     if (vol5m === null) {
       console.log(`  [VolDry] API Fetch Error - Volume check skipped this cycle. Menganggap volume aman.`);
-      // biarkan volDryCycles yang lama tidak diubah
-    } else if (vol5m < VOL_DRY_THRESHOLD_USD) {
-      pos_state.volDryCycles = (pos_state.volDryCycles || 0) + 1;
-      console.log(`  [VolDry] Low volume ($${vol5m}) cycle ${pos_state.volDryCycles}/${VOL_DRY_CYCLES}`);
-      if (pos_state.volDryCycles === 1) {
-        await sendTelegram(
-          `📉 <b>Volume Mulai Sepi!</b>\n` +
-          `Token: <b>${pos_state.symbol}</b>\n` +
-          `Vol 5m: <b>${fmtUsd(vol5m)}</b> (threshold: ${fmtUsd(VOL_DRY_THRESHOLD_USD)})\n` +
-          `Cycle: ${pos_state.volDryCycles}/${VOL_DRY_CYCLES} — pantau terus...`
-        );
-      }
-      saveState(state);
-      if (pos_state.volDryCycles >= VOL_DRY_CYCLES) {
-        console.log(`[Action] VOL_DRY triggered after ${VOL_DRY_CYCLES} cycles!`);
-        await handleClose(state, pos_state, 'VOL_DRY', estPnlSol, estPnlPct, displayFeeSol);
-        return;
-      }
-    } else {
-      if (pos_state.volDryCycles > 0) {
-        console.log(`  [VolDry] Volume recovered, reset counter`);
-        pos_state.volDryCycles = 0;
-        saveState(state);
-      }
     }
 
     const oorDir = getOORDirection(activeBinId, pos_state.minBinId, pos_state.maxBinId);
-    const oorLimit = oorDir === 'ABOVE' ? OOR_ABOVE_LIMIT_MIN : OOR_BELOW_LIMIT_MIN;
-
-    // Track OOR
+    
+    // Track OOR untuk ngetok timer waktu
     if (!inRange) {
       if (!pos_state.outOfRangeSince) {
         pos_state.outOfRangeSince = Date.now();
         pos_state.oorDirection = oorDir;
         saveState(state);
-        await sendTelegram(
-          `📍 <b>Out of Range!</b>\n` +
-          `Token: <b>${pos_state.symbol}</b>\n` +
-          `Arah: ${oorDir === 'ABOVE' ? '📈 Pump — tunggu reversal' : '📉 Dump — close lebih cepat'}\n` +
-          `Batas: ${oorLimit} menit\n` +
-          `PnL saat ini: ${fmtPct(estPnlPct)}`
-        );
       }
     } else {
-      if (pos_state.outOfRangeSince) {
-        await sendTelegram(
-          `✅ <b>Kembali In-Range!</b>\n` +
-          `Token: <b>${pos_state.symbol}</b>\n` +
-          `PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(displayFeeSol)} SOL\n` +
-          `Fee mulai masuk lagi 💰`
-        );
-      }
       pos_state.outOfRangeSince = null;
       pos_state.oorDirection = null;
       saveState(state);
@@ -358,45 +320,37 @@ async function runCycle() {
     const outOfRangeMinutes = pos_state.outOfRangeSince
       ? (Date.now() - pos_state.outOfRangeSince) / 60000 : 0;
 
-    console.log(`  PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(displayFeeSol)} SOL | InRange: ${inRange} | OOR: ${outOfRangeMinutes.toFixed(1)}min (${oorDir}) | Limit: ${oorLimit}min`);
+    console.log(`  PnL: ${fmtPct(estPnlPct)} | Fee: ${fmtSol(displayFeeSol)} SOL | InRange: ${inRange} | OOR: ${outOfRangeMinutes.toFixed(1)}min (${oorDir})`);
 
-    // ── STOP LOSS (MATI / DISABLE SEMENTARA)
-    /*
-    if (estPnlPct <= -STOP_LOSS_PCT) {
-      console.log('[Action] STOP LOSS triggered!');
-      await handleClose(state, pos_state, 'STOP_LOSS', estPnlSol, estPnlPct, totalFeeSol);
+    // ── AI EXIT DECISION (CLAUDE) ──
+    const posMetrics = {
+      pnlPct: estPnlPct,
+      pnlUsd: estPnlUsd,
+      unclaimedFeeSol: displayFeeSol,
+      vol5mUsd: vol5m,
+      inRange,
+      outOfRangeMinutes: outOfRangeMinutes.toFixed(1),
+      oorDirection: oorDir,
+      poolPrice: displayPrice
+    };
+
+    console.log(`🧠 AI sedang menganalisa posisi ${pos_state.symbol}...`);
+    const aiDecision = await decideExit(pos_state, posMetrics);
+
+    if (aiDecision && aiDecision.action === 'CLOSE') {
+      console.log(`[Action - AI] CLOSE triggered! Alasan: ${aiDecision.reasoning}`);
+      await sendTelegram(
+        `🤖 <b>AI DECISION: CLOSE POSITION</b>\n` +
+        `Token: <b>${pos_state.symbol}</b>\n` +
+        `PnL Terakhir: ${fmtPct(estPnlPct)}\n` +
+        `Alasan Claude:\n<i>"${aiDecision.reasoning}"</i>\n` +
+        `Mengeksekusi cutloss/take-profit sekarang...`
+      );
+      await handleClose(state, pos_state, 'AI_CLOSE', estPnlSol, estPnlPct, displayFeeSol);
       return;
     }
-    */
 
-    // ── TAKE PROFIT
-    if (estPnlPct >= TAKE_PROFIT_PCT) {
-      console.log('[Action] TAKE PROFIT triggered!');
-      await handleClose(state, pos_state, 'TAKE_PROFIT', estPnlSol, estPnlPct, displayFeeSol);
-      return;
-    }
-
-    // ── OOR smart limit
-    if (!inRange && outOfRangeMinutes >= oorLimit) {
-      const reason = oorDir === 'ABOVE' ? 'OOR_ABOVE' : 'OOR_BELOW';
-      console.log(`[Action] OOR ${oorDir} limit reached (${outOfRangeMinutes.toFixed(1)}/${oorLimit}min), closing.`);
-      await handleClose(state, pos_state, reason, estPnlSol, estPnlPct, displayFeeSol);
-      return;
-    }
-
-    // ── CLAIM FEE (disabled — fee akan terclaim otomatis saat close position)
-    // if (totalFeeSol >= FEE_CLAIM_THRESHOLD_SOL) {
-    //   console.log(`[Action] Claiming fees: ${fmtSol(totalFeeSol)} SOL`);
-    //   try {
-    //     await claimFees(pos_state, dlmm, pos);
-    //     await sendTelegram(...);
-    //   } catch (e) {
-    //     console.error('[Claim] Error:', e.message);
-    //   }
-    //   return;
-    // }
-
-    // ── STATUS update setiap cycle (sekarang 1 menit)
+    // ── STATUS update setiap cycle
     {
       const pnlText = estPnlUsd !== null
         ? `${fmtPct(estPnlPct)} (~$${estPnlUsd.toFixed(2)})`
@@ -407,7 +361,8 @@ async function runCycle() {
         `PnL: <b>${pnlText}</b>\n` +
         `Fee: ${fmtSol(displayFeeSol)} SOL\n` +
         `Price: ${fmtPrice(displayPrice)}\n` +
-        `Status: ${inRange ? '✅ In Range' : `⚠️ OOR ${oorDir} (${outOfRangeMinutes.toFixed(0)}/${oorLimit}min)`}`
+        `Status: ${inRange ? '✅ In Range' : `⚠️ OOR ${oorDir} (${outOfRangeMinutes.toFixed(0)}min)`}\n` +
+        (aiDecision ? `\n🧠 <b>AI Says:</b> <i>"${aiDecision.reasoning}"</i>` : '')
       );
     }
 
@@ -464,6 +419,42 @@ async function runCycle() {
 
   const best = passed.sort((a, b) => b.vol - a.vol)[0];
   console.log(`[Scan] Best: ${best.symbol} | MC: $${best.mc.toLocaleString()} | Vol: $${(best.vol || 0).toLocaleString()}`);
+
+  // ── AI ENTRY DECISION (CLAUDE) ──
+  console.log(`🧠 AI mempertimbangkan entry ${best.symbol}...`);
+  // Load 3 trades terakhir untuk dipelajari
+  let recentTrades = [];
+  try {
+    const rawLogs = fs.readFileSync(LOG_FILE, 'utf8');
+    const allLogs = JSON.parse(rawLogs);
+    recentTrades = allLogs.filter(t => t.action === 'CLOSE').reverse().slice(0, 3);
+  } catch (e) {
+    // abaikan jika log belum ada
+  }
+
+  const aiEntryDecision = await decideEntry(best, recentTrades);
+  if (!aiEntryDecision) {
+    console.log('[AI Entry] Gagal mendapat respon dari Claude. Skip cycle ini untuk mitigasi.');
+    return;
+  }
+
+  if (aiEntryDecision.decision === 'SKIP') {
+    await sendTelegram(
+      `🤖 <b>AI DECISION: SKIP TOKEN</b>\n` +
+      `Token: <b>${best.symbol}</b> (lolos filter dasar)\n` +
+      `Alasan Claude: <i>"${aiEntryDecision.reasoning}"</i>\n` +
+      `Menunggu koin yang resikonya lebih masuk akal...`
+    );
+    return; // AI bilang skip, jangan dibeli.
+  }
+
+  await sendTelegram(
+    `🤖 <b>AI DECISION: ENTRY APPROVED!</b>\n` +
+    `Token: <b>${best.symbol}</b>\n` +
+    `Confidence: ${aiEntryDecision.confidence}%\n` +
+    `Trade Plan: <i>"${aiEntryDecision.trade_plan}"</i>\n` +
+    `Memproses transaksi on-chain...`
+  );
 
   console.log('[Action] Opening position...');
   let posData;
@@ -556,7 +547,7 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
     ? (realizedPnlSol / (pos_state.budgetSol || BUDGET_SOL)) * 100
     : 0;
 
-  appendLog({
+  const tradeData = {
     action: 'CLOSE', reason,
     symbol: pos_state.symbol, mint: pos_state.mint,
     pnl_sol: realizedPnlSol, pnl_pct: realizedPnlPct,
@@ -566,18 +557,32 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
     balance_before_open_sol: baselineSol,
     balance_after_close_sol: afterCloseSol,
     swap_result: swapResult,
-  });
+  };
+  appendLog(tradeData);
 
   state.activePosition = null;
   saveState(state);
 
-  const emoji = { TAKE_PROFIT: '🎉', STOP_LOSS: '🛑', OOR_ABOVE: '📈', OOR_BELOW: '📉', VOL_DRY: '🌵' }[reason] || '⚠️';
+  // ── AI REFLECT/LEARN (CLAUDE) sesudah posisi close ──
+  console.log(`🧠 AI belajar dari trade ${pos_state.symbol}...`);
+  const aiReflect = await reflectTrade(tradeData);
+
+  const emoji = {
+    TAKE_PROFIT: '🎉',
+    STOP_LOSS: '🛑',
+    OOR_ABOVE: '📈',
+    OOR_BELOW: '📉',
+    VOL_DRY: '🌵',
+    AI_CLOSE: '🧠'
+  }[reason] || '⚠️';
+
   const label = {
     TAKE_PROFIT: 'Take Profit',
     STOP_LOSS: 'Stop Loss',
-    OOR_ABOVE: 'OOR Pump — habis waktu tunggu',
+    OOR_ABOVE: 'OOR Pump — habis waktu',
     OOR_BELOW: 'OOR Dump — cut cepat',
-    VOL_DRY: 'Volume Sepi — keluar sebelum terlambat',
+    VOL_DRY: 'Volume Sepi',
+    AI_CLOSE: 'AI Dynamic Exit'
   }[reason] || reason;
 
   let msg =
@@ -586,6 +591,12 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
     `Durasi: ${duration} menit\n` +
     `PnL Realized: <b>${fmtPct(realizedPnlPct)} (${fmtSol(realizedPnlSol)} SOL)</b>\n` +
     `Fee (est): ${fmtSol(totalFeeSol)} SOL\n`;
+
+  if (aiReflect) {
+    msg += `\n🧠 <b>AI Post-Trade Review:</b>\n` +
+           `Analisis: <i>"${aiReflect.analysis}"</i>\n` +
+           `📚 <b>Lesson Learned:</b> <i>"${aiReflect.lesson}"</i>\n`;
+  }
 
   if (swapResult) {
     msg += `\n🔄 Auto-swap: +${fmtSol(swapResult.outSol)} SOL\n`;

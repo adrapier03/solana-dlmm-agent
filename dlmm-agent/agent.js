@@ -389,7 +389,7 @@ async function runCycle() {
     return;
   }
 
-  const { scanned, scannedTokens = [], passed, rejected, cookinRejectDetails = [] } = scanResult;
+  const { scanned, scannedTokens = [], passed, rejected = {} } = scanResult;
   console.log(`[Scan] Scanned: ${scanned} | Passed: ${passed.length}`);
 
   if (passed.length === 0) {
@@ -397,22 +397,16 @@ async function runCycle() {
       ? scannedTokens.map((t) => `• ${t}`).join('\n')
       : '• (tidak ada data token)';
 
-    const cookinDetailsStr = cookinRejectDetails.length > 0
-      ? `\n<b>Detail Cookin Reject:</b>\n${cookinRejectDetails.map(d => `- ${d}`).join('\n')}`
-      : '';
+    const statusLine = scanned === 0
+      ? 'Status: feed GMGN kosong / rate-limit, AI standby.'
+      : `Status: belum ada pool Meteora yang tradable (No pool: ${rejected.no_pool || 0}), AI belum bisa eksekusi.`;
 
     await sendTelegram(
-      `🔍 <b>DLMM Scan #${cycleCount}</b>\n` +
-      `Scanned: ${scanned} tokens | Lolos: 0\n\n` +
-      `<b>Token yang discan:</b>\n${scannedList}\n\n` +
-      `Rejected:\n` +
-      `• Spike 5m: ${rejected.price_spike || 0}\n` +
-      `• Spike 1h: ${rejected.price_spike_1h || 0}\n` +
-      `• No pool Meteora: ${rejected.no_pool || 0}\n` +
-      `• Liq kecil: ${rejected.low_liquidity || 0}\n` +
-      `• Cookin reject: ${rejected.cookin_reject || 0}\n` +
-      `${cookinDetailsStr}\n\n` +
-      `😴 Belum ada token cocok...`
+      `🧠 <b>AI Scan #${cycleCount}</b>\n` +
+      `Scanned: ${scanned} tokens | Kandidat tradable: 0\n\n` +
+      `<b>Token terpantau:</b>\n${scannedList}\n\n` +
+      `${statusLine}\n` +
+      `AI menunggu kandidat yang bisa dieksekusi on-chain.`
     );
     return;
   }
@@ -568,22 +562,12 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
   const aiReflect = await reflectTrade(tradeData);
 
   const emoji = {
-    TAKE_PROFIT: '🎉',
-    STOP_LOSS: '🛑',
-    OOR_ABOVE: '📈',
-    OOR_BELOW: '📉',
-    VOL_DRY: '🌵',
     AI_CLOSE: '🧠'
   }[reason] || '⚠️';
 
   const label = {
-    TAKE_PROFIT: 'Take Profit',
-    STOP_LOSS: 'Stop Loss',
-    OOR_ABOVE: 'OOR Pump — habis waktu',
-    OOR_BELOW: 'OOR Dump — cut cepat',
-    VOL_DRY: 'Volume Sepi',
     AI_CLOSE: 'AI Dynamic Exit'
-  }[reason] || reason;
+  }[reason] || `Legacy: ${reason}`;
 
   let msg =
     `${emoji} <b>Position Closed — ${label}</b>\n` +
@@ -611,10 +595,10 @@ async function handleClose(state, pos_state, reason, pnlSol, pnlPct, totalFeeSol
 // ─── MAIN ────────────────────────────────────────────────────
 async function main() {
   ensureSingleInstance();
-  console.log('🤖 DLMM Agent starting...');
+  console.log('🧠 DLMM AI Agent starting...');
   console.log(`Wallet: ${wallet.publicKey.toBase58()}`);
-  console.log(`SL: OFF (configured -${STOP_LOSS_PCT}% disabled) | TP: +${TAKE_PROFIT_PCT}%`);
-  console.log(`OOR Above: ${OOR_ABOVE_LIMIT_MIN}min | OOR Below: ${OOR_BELOW_LIMIT_MIN}min`);
+  console.log('Mode: FULL AI (Entry/Exit/Reflect by Claude)');
+  console.log('Legacy TP/SL/OOR rule: bypassed (AI-driven).');
 
   // Patch dlmm bytes import
   try {
@@ -629,11 +613,11 @@ async function main() {
   } catch {}
 
   await sendTelegram(
-    `🤖 <b>DLMM Agent Started!</b>\n` +
+    `🧠 <b>DLMM AI Agent Started!</b>\n` +
     `Wallet: <code>${wallet.publicKey.toBase58()}</code>\n` +
     `Budget: ${BUDGET_SOL} SOL | Bins: ${process.env.RANGE_BINS}\n` +
-    `TP: +${TAKE_PROFIT_PCT}% | SL: OFF (configured -${STOP_LOSS_PCT}%)\n` +
-    `OOR Pump: ${OOR_ABOVE_LIMIT_MIN}min | OOR Dump: ${OOR_BELOW_LIMIT_MIN}min\n` +
+    `Mode: <b>FULL AI</b> (Claude putuskan Entry/Exit/Learning)\n` +
+    `Legacy TP/SL/OOR: <b>bypassed</b>\n` +
     `Cycle: tiap ${CYCLE_INTERVAL_SEC / 60} menit\n` +
     `Orphan check: tiap 3 cycles ✅`
   );

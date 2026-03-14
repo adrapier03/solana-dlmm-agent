@@ -191,23 +191,11 @@ function parseCookinData(text, mint) {
 export function passCookinFilter(data) {
   if (!data) return { pass: true, reasons: [] }; // gagal scrape → jangan block
 
-  const reasons = [];
+  // ─── Filter: AI MODE (BYPASS SEMUA REJECT COOKIN) ───
+  // Karena sekarang pakai AI (Claude) buat mikir, kita lolosin semua data Cookin.
+  // AI yang bakal baca "bearishCount", "bundle", dsb dan mutusin sendiri.
 
-  // Syarat utama: Harus maksimal 2 sinyal merah (bearish max 2)
-  if (data.bearishCount > 2) {
-    reasons.push(`Terlalu banyak bearish/merah (${data.bearishCount}/7)`);
-  }
-
-  // SEMUA HARD REJECT DISINI SUDAH DIMATIKAN SESUAI REQUEST
-  // Termasuk Bundle > 70%, Dumpers > 80%, dll 
-  // Sekarang murni ikut rule "minimal 3 merah baru reject"
-
-  if (reasons.length > 0) {
-    console.log(`[Cookin] ❌ REJECT: ${reasons.join(' | ')}`);
-    return { pass: false, reasons };
-  }
-
-  console.log(`[Cookin] ✅ PASS — ${data.overallSignal}`);
+  console.log(`[Cookin] ✅ Bypassed to AI — ${data.overallSignal}`);
   return { pass: true, reasons: [] };
 }
 

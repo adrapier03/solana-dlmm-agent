@@ -100,19 +100,19 @@ export async function scanTokens() {
 
     if (!mint) { console.log(`  ❌ REJECT: mint address tidak ada`); continue; }
 
-    // Filter price change 5m
-    if (Math.abs(priceChange5m) > MAX_PRICE_CHANGE_5M) {
-      console.log(`  ❌ REJECT: Price spike 5m terlalu besar (${priceChange5m.toFixed(2)}%, max ±${MAX_PRICE_CHANGE_5M}%)`);
-      results.rejected.price_spike = (results.rejected.price_spike || 0) + 1;
-      continue;
-    }
+    // Filter price change 5m (BYPASS UNTUK AI)
+    // if (Math.abs(priceChange5m) > MAX_PRICE_CHANGE_5M) {
+    //   console.log(`  ❌ REJECT: Price spike 5m terlalu besar (${priceChange5m.toFixed(2)}%, max ±${MAX_PRICE_CHANGE_5M}%)`);
+    //   results.rejected.price_spike = (results.rejected.price_spike || 0) + 1;
+    //   continue;
+    // }
 
-    // Filter price change 1h
-    if (Math.abs(priceChange1h) > MAX_PRICE_CHANGE_1H) {
-      console.log(`  ❌ REJECT: Price spike 1h terlalu besar (${priceChange1h.toFixed(2)}%, max ±${MAX_PRICE_CHANGE_1H}%)`);
-      results.rejected.price_spike_1h = (results.rejected.price_spike_1h || 0) + 1;
-      continue;
-    }
+    // Filter price change 1h (BYPASS UNTUK AI)
+    // if (Math.abs(priceChange1h) > MAX_PRICE_CHANGE_1H) {
+    //   console.log(`  ❌ REJECT: Price spike 1h terlalu besar (${priceChange1h.toFixed(2)}%, max ±${MAX_PRICE_CHANGE_1H}%)`);
+    //   results.rejected.price_spike_1h = (results.rejected.price_spike_1h || 0) + 1;
+    //   continue;
+    // }
 
     // Cari pool Meteora
     const matched = allPairs.filter(p =>

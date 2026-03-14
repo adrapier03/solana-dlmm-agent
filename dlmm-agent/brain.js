@@ -7,6 +7,10 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+// Default model terbaru (bisa dioverride dari .env)
+const ENTRY_EXIT_MODEL = process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6';
+const REFLECT_MODEL = process.env.ANTHROPIC_REFLECT_MODEL || ENTRY_EXIT_MODEL;
+
 const MEMORY_FILE = './ai_memory.json';
 
 // Initialize memory if it doesn't exist
@@ -56,7 +60,7 @@ Jawab dalam format JSON terstruktur persis seperti ini:
 
   try {
     const response = await anthropic.messages.create({
-      model: "claude-3-haiku-20240307",
+      model: ENTRY_EXIT_MODEL,
       max_tokens: 500,
       temperature: 0.7,
       system: systemPrompt,
@@ -104,7 +108,7 @@ Jawab dalam format JSON:
 
   try {
     const response = await anthropic.messages.create({
-      model: "claude-3-haiku-20240307",
+      model: ENTRY_EXIT_MODEL,
       max_tokens: 300,
       temperature: 0.5,
       system: systemPrompt,
@@ -142,7 +146,7 @@ Jawab dalam format JSON:
 
   try {
     const response = await anthropic.messages.create({
-      model: "claude-3-haiku-20240307",
+      model: REFLECT_MODEL,
       max_tokens: 300,
       temperature: 0.7,
       system: systemPrompt,

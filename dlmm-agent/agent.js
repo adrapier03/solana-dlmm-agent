@@ -13,6 +13,7 @@ const STATE_FILE = './state.json';
 const LOG_FILE = './trade_log.json';
 const POOLS_FILE = './known_pools.json'; // track semua pool yang pernah dipakai
 const PID_FILE = './agent.pid';
+const AI_SKIP_CACHE_FILE = './ai_skip_cache.json';
 
 const STOP_LOSS_PCT = parseFloat(process.env.STOP_LOSS_PCT || '20');
 const TAKE_PROFIT_PCT = parseFloat(process.env.TAKE_PROFIT_PCT || '10');
@@ -24,6 +25,10 @@ const OOR_ABOVE_LIMIT_MIN = parseFloat(process.env.OOR_ABOVE_LIMIT_MIN || '60');
 const OOR_BELOW_LIMIT_MIN = parseFloat(process.env.OOR_BELOW_LIMIT_MIN || '20');
 const VOL_DRY_THRESHOLD_USD = parseFloat(process.env.VOL_DRY_THRESHOLD_USD || '20000');
 const VOL_DRY_CYCLES = parseInt(process.env.VOL_DRY_CYCLES || '3');
+const AI_SKIP_RETRY_MIN = parseInt(process.env.AI_SKIP_RETRY_MIN || '30');
+const AI_SKIP_REEVAL_MC_CHANGE_PCT = parseFloat(process.env.AI_SKIP_REEVAL_MC_CHANGE_PCT || '30');
+const AI_SKIP_REEVAL_VOL_CHANGE_PCT = parseFloat(process.env.AI_SKIP_REEVAL_VOL_CHANGE_PCT || '50');
+const AI_SKIP_NOTIFY_COOLDOWN_MIN = parseInt(process.env.AI_SKIP_NOTIFY_COOLDOWN_MIN || '10');
 
 let cycleCount = 0;
 
@@ -57,6 +62,42 @@ function addKnownPool(poolAddress) {
     pools.push(poolAddress);
     fs.writeFileSync(POOLS_FILE, JSON.stringify(pools, null, 2));
   }
+}
+
+function loadAiSkipCache() {
+  if (!fs.existsSync(AI_SKIP_CACHE_FILE)) return {};
+  try {
+    const obj = JSON.parse(fs.readFileSync(AI_SKIP_CACHE_FILE, 'utf8'));
+    return obj && typeof obj === 'object' ? obj : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveAiSkipCache(cache) {
+  fs.writeFileSync(AI_SKIP_CACHE_FILE, JSON.stringify(cache, null, 2));
+}
+
+function pctMove(nowVal, oldVal) {
+  const nowNum = Number(nowVal || 0);
+  const oldNum = Number(oldVal || 0);
+  if (!Number.isFinite(nowNum) || !Number.isFinite(oldNum)) return 0;
+  if (oldNum <= 0) return nowNum > 0 ? 999 : 0;
+  return Math.abs(((nowNum - oldNum) / oldNum) * 100);
+}
+
+function isSkipCooldownActive(token, skipInfo) {
+  if (!skipInfo || !skipInfo.skippedAt) return false;
+
+  const ageMin = (Date.now() - skipInfo.skippedAt) / 60000;
+  if (ageMin >= AI_SKIP_RETRY_MIN) return false;
+
+  const mcMovePct = pctMove(token.mc, skipInfo.mc);
+  const volMovePct = pctMove(token.vol, skipInfo.vol);
+  const changedEnough = mcMovePct >= AI_SKIP_REEVAL_MC_CHANGE_PCT || volMovePct >= AI_SKIP_REEVAL_VOL_CHANGE_PCT;
+
+  // Kalau market berubah banyak, boleh re-evaluate meski belum timeout.
+  return !changedEnough;
 }
 
 function fmtSol(n) { return typeof n === 'number' ? n.toFixed(4) : '0.0000'; }
@@ -411,7 +452,36 @@ async function runCycle() {
     return;
   }
 
-  const best = passed.sort((a, b) => b.vol - a.vol)[0];
+  const aiSkipCache = loadAiSkipCache();
+  const sortedCandidates = [...passed].sort((a, b) => (b.vol || 0) - (a.vol || 0));
+  const eligibleCandidates = sortedCandidates.filter((t) => !isSkipCooldownActive(t, aiSkipCache[t.mint]));
+
+  if (eligibleCandidates.length === 0) {
+    const top = sortedCandidates[0];
+    const topSkip = top ? aiSkipCache[top.mint] : null;
+    const waitMin = topSkip?.skippedAt
+      ? Math.max(0, AI_SKIP_RETRY_MIN - ((Date.now() - topSkip.skippedAt) / 60000))
+      : AI_SKIP_RETRY_MIN;
+
+    const lastNotifyAt = aiSkipCache._meta?.lastCooldownNotifyAt || 0;
+    const canNotify = ((Date.now() - lastNotifyAt) / 60000) >= AI_SKIP_NOTIFY_COOLDOWN_MIN;
+
+    console.log('[AI Cache] Semua kandidat masih cooldown skip, menunggu perubahan market...');
+    if (canNotify) {
+      await sendTelegram(
+        `🧠 <b>AI Cooldown Filter</b>\n` +
+        `Kandidat teratas masih dalam cooldown karena baru di-SKIP sebelumnya.\n` +
+        `Token: <b>${top?.symbol || '-'}</b>\n` +
+        `Re-evaluate lagi sekitar: ${waitMin.toFixed(0)} menit lagi\n` +
+        `Atau lebih cepat kalau MC/Volume berubah signifikan.`
+      );
+      aiSkipCache._meta = { ...(aiSkipCache._meta || {}), lastCooldownNotifyAt: Date.now() };
+      saveAiSkipCache(aiSkipCache);
+    }
+    return;
+  }
+
+  const best = eligibleCandidates[0];
   console.log(`[Scan] Best: ${best.symbol} | MC: $${best.mc.toLocaleString()} | Vol: $${(best.vol || 0).toLocaleString()}`);
 
   // ── AI ENTRY DECISION (CLAUDE) ──
@@ -433,13 +503,30 @@ async function runCycle() {
   }
 
   if (aiEntryDecision.decision === 'SKIP') {
+    aiSkipCache[best.mint] = {
+      symbol: best.symbol,
+      skippedAt: Date.now(),
+      reason: aiEntryDecision.reasoning,
+      confidence: aiEntryDecision.confidence || null,
+      mc: Number(best.mc || 0),
+      vol: Number(best.vol || 0),
+    };
+    saveAiSkipCache(aiSkipCache);
+
     await sendTelegram(
       `🤖 <b>AI DECISION: SKIP TOKEN</b>\n` +
       `Token: <b>${best.symbol}</b> (lolos filter dasar)\n` +
+      `Cooldown: ${AI_SKIP_RETRY_MIN} menit (biar gak diulang terus)\n` +
       `Alasan Claude: <i>"${aiEntryDecision.reasoning}"</i>\n` +
-      `Menunggu koin yang resikonya lebih masuk akal...`
+      `Menunggu kandidat lain / perubahan market signifikan...`
     );
     return; // AI bilang skip, jangan dibeli.
+  }
+
+  // Token ini lolos keputusan AI -> reset skip cache supaya bisa dievaluasi normal lagi.
+  if (aiSkipCache[best.mint]) {
+    delete aiSkipCache[best.mint];
+    saveAiSkipCache(aiSkipCache);
   }
 
   await sendTelegram(
